@@ -26,18 +26,24 @@ var (
 			"http://localhost:9200",
 			//"http://localhost:9201",
 		}}
-	es, _ = elasticsearch.NewClient(cfg)
+	es, _               = elasticsearch.NewClient(cfg)
+	ch                  = make(chan struct{})
+	chShutdown          = make(chan struct{})
+	globalGoroutinePool = 100
+	globalDocsToIndex   = 10000
+	mtx                 = sync.Mutex{}
 )
 
 func stressTest() {
+	defer func() { ch <- struct{}{} }()
+	defer wg.Done()
+	defer reduceDocsToIndex()
+
 	rand.Seed(time.Now().Unix())
 	firstName := possibleFirstName[rand.Intn(len(possibleFirstName))]
 	lastName := possibleLastName[rand.Intn(len(possibleLastName))]
 	fullName := fmt.Sprintf("%s %s", firstName, lastName)
 	fmt.Println(fullName)
-
-	wg.Add(1)
-	defer wg.Done()
 
 	// Build the request body.
 	var b strings.Builder
@@ -85,14 +91,40 @@ func stressTest() {
 
 }
 
+func reduceDocsToIndex() {
+	mtx.Lock()
+	globalDocsToIndex--
+	mtx.Unlock()
+}
+
+func coordinator() {
+	fmt.Println("Coordinator Starting.")
+Loop:
+	for {
+		select {
+		case <-ch:
+			fmt.Println("Coordinator: Calling one more worker")
+			if globalDocsToIndex > 0 {
+				wg.Add(1)
+				go stressTest()
+			}
+		case <-chShutdown:
+			fmt.Println("Coordinator dying. Goodbye")
+			wg.Done()
+			break Loop
+		}
+	}
+}
+
 func main() {
 	fmt.Println("stressTest on ES database is starting! hit ctrl+c to stop it!")
 	log.Println(elasticsearch.Version)
 	//log.Println(es.Info())
-
+	wg.Add(1)
+	go coordinator()
 	start := time.Now()
-
-	for i := 0; i <= 10000; i++ {
+	for i := 0; i <= globalGoroutinePool; i++ {
+		wg.Add(1)
 		go stressTest()
 	}
 	wg.Wait()
